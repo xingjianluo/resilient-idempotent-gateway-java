@@ -1,5 +1,7 @@
 package com.github.xingjianluo.resilientidempotentgatewayjava.idempotency;
 
+import com.github.xingjianluo.resilientidempotentgatewayjava.reconciliation.ReconcileStoreResult;
+import com.github.xingjianluo.resilientidempotentgatewayjava.reconciliation.ReconciliationInfo;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
@@ -127,5 +129,64 @@ public class InMemoryIdempotencyStore implements IdempotencyStore {
         records.put(composite(record.getCallerId(), record.getKey()), record);
         log.debug("record completed callerId={} key={} status={} errorCode={}",
                 record.getCallerId(), record.getKey(), record.getStatus(), record.getErrorCode());
+    }
+
+    @Override
+    public ReconcileStoreResult reconcile(String callerId, String key, Duration ttl,
+                                          ReconciliationInfo info) {
+        ensureAvailable();
+        CompositeKey ck = composite(callerId, key);
+        ReconcileStoreResult[] result = new ReconcileStoreResult[1];
+        records.compute(ck, (k, existing) -> {
+            if (existing == null) {
+                result[0] = new ReconcileStoreResult(ReconcileStoreResult.Status.NOT_FOUND, null);
+                return null;
+            }
+            if (existing.getStatus() != IdempotencyStatus.IN_FLIGHT && terminalExpired(existing, ttl)) {
+                result[0] = new ReconcileStoreResult(ReconcileStoreResult.Status.EXPIRED, existing);
+                return existing;
+            }
+            if (!existing.isPendingReconciliation()) {
+                // 非待对账：自然终态（SUCCEEDED/FAILED）、IN_FLIGHT，或已被回写过
+                result[0] = new ReconcileStoreResult(ReconcileStoreResult.Status.NOT_PENDING, existing);
+                return existing;
+            }
+            // 原子生效：UNCERTAIN -> 权威稳定终态
+            existing.setStatus(info.getVerdict().targetStatus());
+            existing.setErrorCode(switch (info.getVerdict()) {
+                case CONFIRMED_SUCCEEDED -> null;
+                case CONFIRMED_FAILED -> "RECONCILED_CONFIRMED_FAILED";
+            });
+            existing.setReconciliation(info);
+            result[0] = new ReconcileStoreResult(ReconcileStoreResult.Status.APPLIED, existing);
+            return existing;
+        });
+        log.info("reconcile attempt callerId={} key={} verdict={} outcome={}",
+                callerId, key, info.getVerdict(), result[0].status());
+        return result[0];
+    }
+
+    @Override
+    public long pendingReconciliationCount(Duration ttl, boolean includeExpired) {
+        ensureAvailable();
+        // 统计的同时惰性清理已过期终态记录，避免内存随运行时间无界增长；
+        // includeExpired=true 时，被清理前仍处于待对账的记录也计入本次观测口径。
+        long count = 0;
+        var it = records.entrySet().iterator();
+        while (it.hasNext()) {
+            IdempotencyRecord record = it.next().getValue();
+            boolean pending = record.isPendingReconciliation();
+            if (record.getStatus() != IdempotencyStatus.IN_FLIGHT && terminalExpired(record, ttl)) {
+                it.remove();
+                if (pending && includeExpired) {
+                    count++;
+                }
+                continue;
+            }
+            if (pending) {
+                count++;
+            }
+        }
+        return count;
     }
 }

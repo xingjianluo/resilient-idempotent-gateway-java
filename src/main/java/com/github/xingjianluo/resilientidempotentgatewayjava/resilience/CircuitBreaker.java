@@ -148,4 +148,18 @@ public class CircuitBreaker {
     public synchronized CircuitBreakerState currentState() {
         return state;
     }
+
+    /**
+     * 重置为 CLOSED 并清空全部统计（测试与运维干预使用）。
+     * 不影响在途调用；在途调用随后的 record 会计入新窗口。
+     */
+    public synchronized void reset() {
+        state = CircuitBreakerState.CLOSED;
+        windowCalls = 0;
+        windowFailures = 0;
+        openedAt = null;
+        trialSuccesses = 0;
+        trialInFlight = false;
+        log.info("circuit reset to CLOSED dependency={}", dependency);
+    }
 }

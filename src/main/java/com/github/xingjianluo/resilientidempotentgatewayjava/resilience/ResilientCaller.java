@@ -226,6 +226,11 @@ public class ResilientCaller {
         return runtime(dependency).breaker().currentState();
     }
 
+    /** 重置指定依赖的熔断器统计与状态（测试与运维干预使用）。 */
+    public void resetCircuit(String dependency) {
+        runtime(dependency).breaker().reset();
+    }
+
     private record AttemptResult<T>(boolean success, T value, DownstreamException failure) {
         static <T> AttemptResult<T> success(T value) {
             return new AttemptResult<>(true, value, null);

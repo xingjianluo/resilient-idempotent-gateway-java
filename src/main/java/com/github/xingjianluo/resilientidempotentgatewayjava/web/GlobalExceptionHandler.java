@@ -2,6 +2,8 @@ package com.github.xingjianluo.resilientidempotentgatewayjava.web;
 
 import com.github.xingjianluo.resilientidempotentgatewayjava.idempotency.IdempotencyRejectCode;
 import com.github.xingjianluo.resilientidempotentgatewayjava.idempotency.IdempotencyRejectedException;
+import com.github.xingjianluo.resilientidempotentgatewayjava.reconciliation.ReconciliationInfo;
+import com.github.xingjianluo.resilientidempotentgatewayjava.reconciliation.ReconciliationRejectedException;
 import com.github.xingjianluo.resilientidempotentgatewayjava.resilience.BusinessException;
 import com.github.xingjianluo.resilientidempotentgatewayjava.resilience.DownstreamErrorType;
 import com.github.xingjianluo.resilientidempotentgatewayjava.resilience.DownstreamException;
@@ -13,6 +15,9 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+
+import java.util.LinkedHashMap;
+import java.util.Map;
 
 /**
  * 将各类内部异常映射为可区分的对外错误。
@@ -31,6 +36,27 @@ public class GlobalExceptionHandler {
         log.info("idempotency rejection code={} traceId={}", code.code(), ex.getTraceId());
         return ResponseEntity.status(code.httpStatus())
                 .body(new ApiError(ex.getTraceId(), code.code(), ex.getMessage()));
+    }
+
+    @ExceptionHandler(ReconciliationRejectedException.class)
+    public ResponseEntity<Map<String, Object>> handleReconciliationRejected(
+            ReconciliationRejectedException ex) {
+        IdempotencyRejectCode code = ex.getRejectCode();
+        log.info("reconciliation rejection code={} traceId={}", code.code(), ex.getTraceId());
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("traceId", ex.getTraceId());
+        body.put("code", code.code());
+        body.put("message", ex.getMessage());
+        // 结论冲突时带出胜出方，使落败方能看出自己是被谁抢先的
+        ReconciliationInfo winner = ex.getWinner();
+        if (winner != null) {
+            body.put("effectiveVerdict", winner.getVerdict().name());
+            body.put("effectiveStatus", winner.getVerdict().targetStatus().name());
+            body.put("reconciledBy", winner.getReconciledBy());
+            body.put("reconciledAt", winner.getReconciledAt().toString());
+            body.put("reconciliationTraceId", winner.getTraceId());
+        }
+        return ResponseEntity.status(code.httpStatus()).body(body);
     }
 
     @ExceptionHandler(DownstreamException.class)

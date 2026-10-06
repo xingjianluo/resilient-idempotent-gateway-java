@@ -44,9 +44,15 @@ class CommandControllerE2ETest {
     @Autowired
     private com.github.xingjianluo.resilientidempotentgatewayjava.idempotency.InMemoryIdempotencyStore store;
 
+    @Autowired
+    private com.github.xingjianluo.resilientidempotentgatewayjava.resilience.ResilientCaller resilientCaller;
+
     @BeforeEach
     void resetStore() {
         store.setAvailable(true);
+        // 多个 E2E 类共享同一 Spring 上下文，复位熔断器避免超时用例的失败统计跨类累积
+        resilientCaller.resetCircuit(
+                com.github.xingjianluo.resilientidempotentgatewayjava.demo.TransferService.DEPENDENCY_LEDGER);
     }
 
     private static final String BODY =

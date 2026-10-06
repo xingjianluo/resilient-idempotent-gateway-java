@@ -83,6 +83,10 @@ public class IdempotentCommandService {
             return handleExisting(record, payloadHash, traceId, resultType, business);
         }
 
+        // 1.5) 全新键：待对账积压达到上限时降级，拒绝受理新键（不占位、不执行业务）。
+        // 已有键的重放/对账回写不受影响；积压随回写或过期清理而下降后自动恢复。
+        ensureBacklogBelowLimit(callerId, key, traceId);
+
         // 2) 无记录：原子占位
         IdempotencyRecord claimed = IdempotencyRecord.inFlight(
                 callerId, key, payloadHash, clock.instant());
@@ -102,6 +106,31 @@ public class IdempotentCommandService {
         }
 
         return runBusiness(claimed, traceId, resultType, business);
+    }
+
+    private void ensureBacklogBelowLimit(String callerId, String key, String traceId) {
+        long max = properties.getReconciliationMaxPending();
+        if (max <= 0) {
+            return; // 上限 <=0 表示不启用积压降级
+        }
+        long pending;
+        try {
+            pending = store.pendingReconciliationCount(properties.getTtl(),
+                    properties.isReconciliationBacklogIncludeExpired());
+        } catch (StoreAccessException e) {
+            log.warn("[{}] store unavailable on backlog check, fail-closed reject. callerId={} key={}",
+                    traceId, callerId, key);
+            throw new IdempotencyRejectedException(IdempotencyRejectCode.STORE_UNAVAILABLE,
+                    "idempotency store is temporarily unavailable, request rejected (no side effect)", traceId);
+        }
+        if (pending >= max) {
+            log.warn("[{}] reconciliation backlog full ({}/{}), new key rejected. callerId={} key={}",
+                    traceId, pending, max, callerId, key);
+            throw new IdempotencyRejectedException(IdempotencyRejectCode.RECONCILE_BACKLOG_FULL,
+                    "reconciliation backlog is full (" + pending + "/" + max
+                            + "), new keys are rejected until pending records are reconciled or expire",
+                    traceId);
+        }
     }
 
     private <T> IdempotencyOutcome<T> handleExisting(IdempotencyRecord record, String payloadHash,

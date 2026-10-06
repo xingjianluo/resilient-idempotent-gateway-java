@@ -1,5 +1,8 @@
 package com.github.xingjianluo.resilientidempotentgatewayjava.idempotency;
 
+import com.github.xingjianluo.resilientidempotentgatewayjava.reconciliation.ReconcileStoreResult;
+import com.github.xingjianluo.resilientidempotentgatewayjava.reconciliation.ReconciliationInfo;
+
 import java.time.Duration;
 import java.util.Optional;
 
@@ -39,4 +42,21 @@ public interface IdempotencyStore {
      * 将同一记录迁移到终态。只有成功 claim/接管的持有者会调用。
      */
     void complete(IdempotencyRecord record, Duration ttl);
+
+    /**
+     * 原子对账回写：仅当当前记录处于“UNCERTAIN 且尚未对账”时，
+     * 将其迁移到 {@code info.getVerdict().targetStatus()} 并记录回写元数据。
+     * 并发下必须只有一个调用方得到 {@code APPLIED}。
+     *
+     * @return 判定结果及判定时的当前记录（供落败方读取胜出结论）
+     */
+    ReconcileStoreResult reconcile(String callerId, String key, Duration ttl, ReconciliationInfo info);
+
+    /**
+     * 统计当前待对账（UNCERTAIN 且未回写）记录数，用于积压观测与上限控制。
+     *
+     * @param ttl            终态记录存活时间（已过期待对账记录默认不计入）
+     * @param includeExpired 观测口径：是否把已过期但尚未清理的待对账记录也计入
+     */
+    long pendingReconciliationCount(Duration ttl, boolean includeExpired);
 }

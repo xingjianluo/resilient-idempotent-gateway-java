@@ -1,10 +1,16 @@
 package com.github.xingjianluo.resilientidempotentgatewayjava.idempotency;
 
+import com.github.xingjianluo.resilientidempotentgatewayjava.reconciliation.ReconciliationInfo;
+
 import java.time.Instant;
 
 /**
  * 幂等存储中的一条记录。状态迁移仅允许：
- * IN_FLIGHT -> SUCCEEDED / FAILED / UNCERTAIN。
+ * IN_FLIGHT -> SUCCEEDED / FAILED / UNCERTAIN；
+ * 此外 UNCERTAIN 允许经对账回写一次性迁移到 SUCCEEDED / FAILED（稳定终态）。
+ * <p>
+ * 兼容说明：本次改动前产生的遗留记录没有 reconciliation 字段（为 null），
+ * 视为“UNCERTAIN 且尚未对账”，可被正常回写与重放。
  */
 public final class IdempotencyRecord {
 
@@ -16,6 +22,8 @@ public final class IdempotencyRecord {
     private volatile String errorCode;
     private final Instant createdAt;
     private volatile Instant completedAt;
+    /** 对账回写元数据；null 表示尚未对账（含遗留记录）。 */
+    private volatile ReconciliationInfo reconciliation;
 
     public IdempotencyRecord(String callerId, String key, String payloadHash,
                              IdempotencyStatus status, Instant createdAt) {
@@ -77,5 +85,18 @@ public final class IdempotencyRecord {
 
     public void setCompletedAt(Instant completedAt) {
         this.completedAt = completedAt;
+    }
+
+    public ReconciliationInfo getReconciliation() {
+        return reconciliation;
+    }
+
+    public void setReconciliation(ReconciliationInfo reconciliation) {
+        this.reconciliation = reconciliation;
+    }
+
+    /** 是否处于“结果未知、尚未对账”的可回写状态。 */
+    public boolean isPendingReconciliation() {
+        return status == IdempotencyStatus.UNCERTAIN && reconciliation == null;
     }
 }

@@ -4,7 +4,9 @@
 
 1. **幂等命令入口**：以 `调用方标识 + 幂等键` 收敛重复 / 并发提交，副作用只发生一次，结果稳定重放；
 2. **下游依赖隔离与降级**：超时、重试、熔断、并发隔离四个策略可配置且互不干扰，失败映射为可区分的对外错误类型；
-3. **失败一致性**：下游结果未知时显式标记 `UNCERTAIN`，不静默重试；全链路 traceId 关联；日志对凭据脱敏。
+3. **失败一致性**：下游结果未知时显式标记 `UNCERTAIN`，不静默重试；全链路 traceId 关联；日志对凭据脱敏；
+4. **对账回写闭环**：`UNCERTAIN` 记录可由权威对账结论一次性回写为稳定终态（成功 / 未成功），
+   之后同键提交直接重放该结论；待对账积压有可配置上限与观测端点，到上限时明确降级。
 
 实现不依赖任何外部服务或真实凭据；所有测试均在本地 JVM 内完成。
 
@@ -47,7 +49,8 @@ Body (JSON):
 ```
 IN_FLIGHT ──业务成功──────────▶ SUCCEEDED（终态，可稳定重放）
           ──确定性业务失败────▶ FAILED   （终态，可稳定重放失败结论）
-          ──下游结果未知──────▶ UNCERTAIN（终态，只重放不确定提示，禁止静默重试）
+          ──下游结果未知──────▶ UNCERTAIN（待对账：只重放不确定提示，禁止静默重试）
+UNCERTAIN ──对账回写（仅一次）▶ SUCCEEDED / FAILED（稳定终态，之后同键提交直接重放该结论）
 ```
 
 ### 判定矩阵
@@ -75,7 +78,69 @@ IN_FLIGHT ──业务成功──────────▶ SUCCEEDED（终态
 
 ---
 
-## 3. 下游降级与恢复规则
+## 3. 对账回写（未知态闭环）
+
+下游超时后入口返回 `UNCERTAIN`（202），调用方拿 traceId 去对账；对账得出权威结论后，
+通过回写入口把结论补写回来，闭环未知态：
+
+```
+POST /commands/reconciliations
+Header:
+  X-Caller-Id:     必填，与原命令一致
+  Idempotency-Key: 必填，与原命令一致
+  X-Trace-Id:      可选，缺省自动生成
+Body (JSON):
+  {"verdict":"CONFIRMED_SUCCEEDED" | "CONFIRMED_FAILED",
+   "reconciledBy":"ops-zhang", "reason":"ledger statement #881 confirmed"}
+
+GET /commands/reconciliations/backlog   # 待对账积压观测：{pending, maxPending, includeExpired}
+```
+
+### 回写语义与规则
+
+- **仅“结果未知、尚未对账”的记录可被回写**：`UNCERTAIN` 且从未回写过。
+  回写原子生效后记录迁移为 `SUCCEEDED` / `FAILED` 稳定终态，之后同键提交**直接返回该结论
+  并标 `replayed=true`**，不会再回未知；`reconciledBy / reconciledAt / reason / verdict /
+  reconciliationTraceId` 随记录保存，日志与响应经脱敏、不含凭据。
+- **已成功 / 已失败的记录不可被回写改掉**：自然终态（含 IN_FLIGHT）一律
+  `RECONCILE_NOT_PENDING`（409）。
+- **并发与重复回写**：存储层 `compute` 保证同一键只有一次回写真正生效（`applied=true`）。
+  同结论的其余请求幂等拿到已生效结论（`applied=false`，HTTP 200）；
+  **矛盾结论**（一次说成功、一次说失败）不会两个都写入——落败方得到
+  `RECONCILE_CONFLICT`（409），响应带出胜出方的 `effectiveVerdict / reconciledBy /
+  reconciledAt / reconciliationTraceId`，能明确看出被谁抢先。
+- **可区分的拒绝**（不混为笼统错误）：
+
+  | 场景 | 错误码 | HTTP |
+  |---|---|---|
+  | 键不存在 | `RECONCILE_KEY_NOT_FOUND` | 404 |
+  | 键已过期 | `RECONCILE_KEY_EXPIRED` | 410 |
+  | 不在待对账状态（SUCCEEDED/FAILED/IN_FLIGHT） | `RECONCILE_NOT_PENDING` | 409 |
+  | 与已生效回写结论矛盾 | `RECONCILE_CONFLICT` | 409 |
+  | 存储暂时不可用 | `IDEMPOTENCY_STORE_UNAVAILABLE` | 503 |
+
+- **兼容范围（含改动前遗留记录）**：本次改动前产生的 `UNCERTAIN` 记录没有回写元数据
+  （`reconciliation=null`），一律视为“尚未对账”，可被正常回写与重放，不会因结构差异
+  报错或被当成全新请求；回写后行为与新产生的记录完全一致。
+
+### 待对账积压上限与观测
+
+状态保存在本机内存，待对账记录不能无限堆积：
+
+- `gateway.idempotency.reconciliation-max-pending`（默认 10000）：待对账
+  （`UNCERTAIN` 且未回写、未过期）记录数上限。**到上限时入口降级**：全新键的提交被拒绝
+  （`RECONCILE_BACKLOG_FULL`，503，明确报错而非静默丢弃，不产生副作用、不留新记录）；
+  已有键的重放与对账回写**不受影响**。积压随回写消化或记录过期清理而下降后，新键自动恢复受理。
+  设为 `0` 可关闭该降级。
+- `GET /commands/reconciliations/backlog` 实时返回 `{pending, maxPending, includeExpired}`；
+  积压判定与回写日志也会打印当前 `pending/max`。
+- `gateway.idempotency.reconciliation-backlog-include-expired`（默认 false）：观测口径，
+  是否把已过期但尚未惰性清理的待对账记录也计入 `pending`。统计的同时会惰性清理已过期
+  终态记录，保证内存不随运行时间无界增长。
+
+---
+
+## 4. 下游降级与恢复规则
 
 `ResilientCaller` 按依赖名（如 `ledger`）隔离出独立的 **熔断器 / 信号量隔离 / 线程池**，
 四个策略职责独立、互不干扰，组合顺序为：
@@ -119,7 +184,7 @@ HALF_OPEN ──连续 trial-requests 次试探全部成功───────
 
 ---
 
-## 4. 追踪与敏感信息
+## 5. 追踪与敏感信息
 
 - `TraceFilter` 为每个 HTTP 请求建立或透传 `X-Trace-Id`，写入 SLF4J MDC；
   `ResilientCaller` 将 MDC 传播到依赖线程，入口 / 业务 / 下游日志共享同一 traceId，
@@ -130,7 +195,7 @@ HALF_OPEN ──连续 trial-requests 次试探全部成功───────
 
 ---
 
-## 5. 可配置项
+## 6. 可配置项
 
 `src/main/resources/application.properties`（前缀 / 默认值）：
 
@@ -138,6 +203,8 @@ HALF_OPEN ──连续 trial-requests 次试探全部成功───────
 # 幂等
 gateway.idempotency.ttl=24h                    # 终态记录存活时间；过期同键重放被拒绝
 gateway.idempotency.in-flight-stale-timeout=30s  # IN_FLIGHT 卡死判定阈值，超时后允许原子接管
+gateway.idempotency.reconciliation-max-pending=10000  # 待对账积压上限；到上限拒绝新键（0=关闭）
+gateway.idempotency.reconciliation-backlog-include-expired=false  # 积压观测口径是否含已过期未清理记录
 
 # 下游降级（对所有依赖生效；也可按需扩展为按依赖覆盖）
 gateway.resilience.timeout=2s                  # 单次尝试超时
@@ -155,16 +222,18 @@ gateway.resilience.executor-pool-size=20       # 单依赖隔离线程池大小
 
 ---
 
-## 6. 本地验证
+## 7. 本地验证
 
 无需任何外部服务 / 数据库 / 真实凭据：
 
 ```bash
-# 全量测试（29 个用例）
+# 全量测试（45 个用例）
 mvn test
 
-# 只跑幂等 / 降级 / 端到端 / 脱敏
+# 只跑幂等 / 对账回写 / 降级 / 端到端 / 脱敏
 mvn test -Dtest=IdempotentCommandServiceTest
+mvn test -Dtest=ReconciliationServiceTest
+mvn test -Dtest=ReconciliationE2ETest
 mvn test -Dtest=ResilientCallerTest
 mvn test -Dtest=CommandControllerE2ETest
 mvn test -Dtest=SensitiveDataSanitizerTest
@@ -177,6 +246,15 @@ mvn test -Dtest=SensitiveDataSanitizerTest
 - 同键不同载荷 `PAYLOAD_MISMATCH`；键过期重放 `KEY_EXPIRED`；卡死 IN_FLIGHT 原子接管；
 - 存储读不可用时 fail-closed（503，无副作用）；
 - 下游超时（504，uncertain）→ 幂等 `UNCERTAIN`（202）→ 重复只重放不重试；
+- **对账回写闭环**：`UNCERTAIN` 回写确认成功 / 未成功后，同键提交直接重放稳定终态；
+  遗留老结构未知态记录可正常回写与重放；
+- **并发回写收敛**：16 线程同结论并发回写恰好 1 个生效，其余幂等拿到已生效结论；
+  矛盾结论并发 / 顺序回写只有一个生效，落败方得到 `RECONCILE_CONFLICT` 且能看到胜出方；
+- **回写拒绝可区分**：键不存在（404）/ 键过期（410）/ 非待对账（409）/ 结论冲突（409）；
+  已成功、已失败记录不可被回写改掉；
+- **积压上限降级**：待对账到上限后新键被 `RECONCILE_BACKLOG_FULL`（503）明确拒绝且不留记录，
+  已有键重放与回写不受影响，消化积压后自动恢复；积压量经
+  `GET /commands/reconciliations/backlog` 可观测，口径可配置；
 - 业务校验失败 / 下游余额不足（422 FAILED）与下游失败明确区分，且稳定重放；
 - 熔断：失败率打至 OPEN 快速失败 → 冷却 → 试探成功恢复 / 试探失败重新打开；
 - 重试成功、重试耗尽（`RETRY_EXHAUSTED`）、熔断 / 隔离类失败不重试；
@@ -188,13 +266,14 @@ mvn test -Dtest=SensitiveDataSanitizerTest
 
 ---
 
-## 7. 主要代码结构
+## 8. 主要代码结构
 
 ```
-idempotency/   幂等入口：状态机、原子占位存储、拒绝码、不确定标记
-resilience/    降级链路：CircuitBreaker / Bulkhead / TimeoutGuard / ResilientCaller
-demo/          示例业务：转账服务 + 本地（可替换/可 Mock）下游客户端
-trace/         MDC traceId 上下文与 Servlet 过滤器
-log/           敏感信息脱敏
-web/           HTTP 入口与全局异常映射
+idempotency/    幂等入口：状态机、原子占位存储、拒绝码、不确定标记、积压上限降级
+reconciliation/ 对账回写：权威结论补写、并发胜负判定、回写审计元数据、积压观测
+resilience/     降级链路：CircuitBreaker / Bulkhead / TimeoutGuard / ResilientCaller
+demo/           示例业务：转账服务 + 本地（可替换/可 Mock）下游客户端
+trace/          MDC traceId 上下文与 Servlet 过滤器
+log/            敏感信息脱敏
+web/            HTTP 入口与全局异常映射
 ```

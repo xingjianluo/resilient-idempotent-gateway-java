@@ -21,6 +21,18 @@ public class IdempotencyProperties {
      */
     private Duration inFlightStaleTimeout = Duration.ofSeconds(30);
 
+    /**
+     * 待对账（UNCERTAIN 且未回写）记录的积压上限。达到上限后入口降级：
+     * 拒绝受理全新键（RECONCILE_BACKLOG_FULL），已有键的重放与对账回写不受影响。
+     */
+    private long reconciliationMaxPending = 10_000;
+
+    /**
+     * 积压观测口径：是否把已过期但尚未清理的待对账记录也计入积压量。
+     * 默认 false（只统计仍可回写的未过期待对账记录）。
+     */
+    private boolean reconciliationBacklogIncludeExpired = false;
+
     public Duration getTtl() {
         return ttl;
     }
@@ -35,5 +47,21 @@ public class IdempotencyProperties {
 
     public void setInFlightStaleTimeout(Duration inFlightStaleTimeout) {
         this.inFlightStaleTimeout = inFlightStaleTimeout;
+    }
+
+    public long getReconciliationMaxPending() {
+        return reconciliationMaxPending;
+    }
+
+    public void setReconciliationMaxPending(long reconciliationMaxPending) {
+        this.reconciliationMaxPending = reconciliationMaxPending;
+    }
+
+    public boolean isReconciliationBacklogIncludeExpired() {
+        return reconciliationBacklogIncludeExpired;
+    }
+
+    public void setReconciliationBacklogIncludeExpired(boolean reconciliationBacklogIncludeExpired) {
+        this.reconciliationBacklogIncludeExpired = reconciliationBacklogIncludeExpired;
     }
 }
