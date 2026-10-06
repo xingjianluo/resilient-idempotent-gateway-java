@@ -21,6 +21,20 @@ public class IdempotencyProperties {
      */
     private Duration inFlightStaleTimeout = Duration.ofSeconds(30);
 
+    /**
+     * 待对账（UNCERTAIN 且未回写）积压上限。达到上限后新命令被明确拒绝
+     * （PENDING_RECONCILIATION_BACKLOG_FULL），重放与对账回写不受影响。
+     */
+    private long maxPendingReconciliation = 10_000;
+
+    public long getMaxPendingReconciliation() {
+        return maxPendingReconciliation;
+    }
+
+    public void setMaxPendingReconciliation(long maxPendingReconciliation) {
+        this.maxPendingReconciliation = maxPendingReconciliation;
+    }
+
     public Duration getTtl() {
         return ttl;
     }

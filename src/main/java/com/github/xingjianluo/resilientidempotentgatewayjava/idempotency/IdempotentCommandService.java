@@ -83,6 +83,27 @@ public class IdempotentCommandService {
             return handleExisting(record, payloadHash, traceId, resultType, business);
         }
 
+        // 1.5) 全新命令：待对账积压到上限时明确降级拒绝（重放与对账回写不受限），
+        // 防止 UNCERTAIN 记录无界堆积撑爆内存
+        long pendingBacklog;
+        try {
+            pendingBacklog = store.pendingReconciliationCount();
+        } catch (StoreAccessException e) {
+            log.warn("[{}] store unavailable on backlog check, fail-closed reject. callerId={} key={}",
+                    traceId, callerId, key);
+            throw new IdempotencyRejectedException(IdempotencyRejectCode.STORE_UNAVAILABLE,
+                    "idempotency store is temporarily unavailable, request rejected (no side effect)", traceId);
+        }
+        if (pendingBacklog >= properties.getMaxPendingReconciliation()) {
+            log.warn("[{}] pending reconciliation backlog full ({}/{}), new command rejected. "
+                            + "callerId={} key={}",
+                    traceId, pendingBacklog, properties.getMaxPendingReconciliation(), callerId, key);
+            throw new IdempotencyRejectedException(IdempotencyRejectCode.PENDING_RECONCILIATION_BACKLOG_FULL,
+                    "pending reconciliation backlog is full (" + pendingBacklog + "/"
+                            + properties.getMaxPendingReconciliation()
+                            + "), new commands are rejected until backlog is reconciled", traceId);
+        }
+
         // 2) 无记录：原子占位
         IdempotencyRecord claimed = IdempotencyRecord.inFlight(
                 callerId, key, payloadHash, clock.instant());

@@ -16,6 +16,11 @@ public final class IdempotencyRecord {
     private volatile String errorCode;
     private final Instant createdAt;
     private volatile Instant completedAt;
+    /**
+     * 对账回写信息；null 表示尚未对账。
+     * 改动前遗留的 UNCERTAIN 记录该字段天然为 null，兼容无需迁移。
+     */
+    private volatile ReconciliationInfo reconciliation;
 
     public IdempotencyRecord(String callerId, String key, String payloadHash,
                              IdempotencyStatus status, Instant createdAt) {
@@ -77,5 +82,13 @@ public final class IdempotencyRecord {
 
     public void setCompletedAt(Instant completedAt) {
         this.completedAt = completedAt;
+    }
+
+    public ReconciliationInfo getReconciliation() {
+        return reconciliation;
+    }
+
+    public void setReconciliation(ReconciliationInfo reconciliation) {
+        this.reconciliation = reconciliation;
     }
 }

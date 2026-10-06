@@ -2,6 +2,9 @@ package com.github.xingjianluo.resilientidempotentgatewayjava.web;
 
 import com.github.xingjianluo.resilientidempotentgatewayjava.idempotency.IdempotencyRejectCode;
 import com.github.xingjianluo.resilientidempotentgatewayjava.idempotency.IdempotencyRejectedException;
+import com.github.xingjianluo.resilientidempotentgatewayjava.idempotency.ReconciliationInfo;
+import com.github.xingjianluo.resilientidempotentgatewayjava.reconciliation.ReconciliationRejectCode;
+import com.github.xingjianluo.resilientidempotentgatewayjava.reconciliation.ReconciliationRejectedException;
 import com.github.xingjianluo.resilientidempotentgatewayjava.resilience.BusinessException;
 import com.github.xingjianluo.resilientidempotentgatewayjava.resilience.DownstreamErrorType;
 import com.github.xingjianluo.resilientidempotentgatewayjava.resilience.DownstreamException;
@@ -31,6 +34,20 @@ public class GlobalExceptionHandler {
         log.info("idempotency rejection code={} traceId={}", code.code(), ex.getTraceId());
         return ResponseEntity.status(code.httpStatus())
                 .body(new ApiError(ex.getTraceId(), code.code(), ex.getMessage()));
+    }
+
+    @ExceptionHandler(ReconciliationRejectedException.class)
+    public ResponseEntity<ApiError> handleReconciliationRejected(ReconciliationRejectedException ex) {
+        ReconciliationRejectCode code = ex.getRejectCode();
+        // 结论冲突时附带抢先者信息（谁、何时、什么结论），不含凭据
+        ReconciliationInfo winner = ex.getWinner();
+        String message = ex.getMessage();
+        log.info("reconciliation rejection code={} traceId={} winnerBy={} winnerTraceId={}",
+                code.code(), ex.getTraceId(),
+                winner != null ? winner.getReconciledBy() : null,
+                winner != null ? winner.getTraceId() : null);
+        return ResponseEntity.status(code.httpStatus())
+                .body(new ApiError(ex.getTraceId(), code.code(), message));
     }
 
     @ExceptionHandler(DownstreamException.class)

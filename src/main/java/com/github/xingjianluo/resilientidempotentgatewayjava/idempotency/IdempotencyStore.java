@@ -39,4 +39,18 @@ public interface IdempotencyStore {
      * 将同一记录迁移到终态。只有成功 claim/接管的持有者会调用。
      */
     void complete(IdempotencyRecord record, Duration ttl);
+
+    /**
+     * 原子对账回写：仅当 (callerId,key) 对应记录当前仍为 UNCERTAIN 且尚未对账时，
+     * 将其迁移到 {@code info} 指定的稳定终态并记录回写信息。
+     * 并发回写下必须恰好一个调用方返回 true。
+     *
+     * @return 本次回写是否真正生效
+     */
+    boolean reconcileIfPending(String callerId, String key, ReconciliationInfo info);
+
+    /**
+     * 当前待对账积压量：处于 UNCERTAIN 且尚未对账的记录数（可观测口径）。
+     */
+    long pendingReconciliationCount();
 }

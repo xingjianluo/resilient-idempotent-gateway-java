@@ -128,4 +128,35 @@ public class InMemoryIdempotencyStore implements IdempotencyStore {
         log.debug("record completed callerId={} key={} status={} errorCode={}",
                 record.getCallerId(), record.getKey(), record.getStatus(), record.getErrorCode());
     }
+
+    @Override
+    public boolean reconcileIfPending(String callerId, String key, ReconciliationInfo info) {
+        ensureAvailable();
+        CompositeKey ck = composite(callerId, key);
+        boolean[] applied = {false};
+        // compute 持有同键 bin 锁：状态判定与回写原子完成，并发回写恰好一个生效
+        records.computeIfPresent(ck, (k, current) -> {
+            if (current.getStatus() == IdempotencyStatus.UNCERTAIN
+                    && current.getReconciliation() == null) {
+                current.setStatus(info.getVerdictStatus());
+                current.setReconciliation(info);
+                // 稳定终态自回写时刻起重新计 TTL
+                current.setCompletedAt(info.getReconciledAt());
+                applied[0] = true;
+                log.info("reconciliation applied callerId={} key={} verdict={} reconciledBy={} traceId={}",
+                        callerId, key, info.getVerdictStatus(), info.getReconciledBy(), info.getTraceId());
+            }
+            return current;
+        });
+        return applied[0];
+    }
+
+    @Override
+    public long pendingReconciliationCount() {
+        ensureAvailable();
+        return records.values().stream()
+                .filter(r -> r.getStatus() == IdempotencyStatus.UNCERTAIN
+                        && r.getReconciliation() == null)
+                .count();
+    }
 }

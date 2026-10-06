@@ -11,7 +11,9 @@ public enum IdempotencyRejectCode {
     /** 同键并发请求，首个请求仍在执行中 */
     CONCURRENT_IN_FLIGHT("IDEMPOTENCY_CONCURRENT_IN_FLIGHT", 409),
     /** 幂等存储暂时不可用，入口 fail-closed 降级，不执行业务 */
-    STORE_UNAVAILABLE("IDEMPOTENCY_STORE_UNAVAILABLE", 503);
+    STORE_UNAVAILABLE("IDEMPOTENCY_STORE_UNAVAILABLE", 503),
+    /** 待对账积压达到上限，暂停受理新命令（重放与对账回写不受影响） */
+    PENDING_RECONCILIATION_BACKLOG_FULL("IDEMPOTENCY_PENDING_RECONCILIATION_BACKLOG_FULL", 503);
 
     private final String code;
     private final int httpStatus;
